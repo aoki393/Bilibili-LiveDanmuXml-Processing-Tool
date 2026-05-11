@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>B站弹幕XML转HTML表格工具</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            padding: 24px;
+        }
+        h1 {
+            margin-top: 0;
+            color: #1e88e5;
+            font-size: 1.8rem;
+        }
+        .description {
+            background: #e3f2fd;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 16px 0;
+            font-size: 0.9rem;
+            color: #0d47a1;
+        }
+        .file-area {
+            margin: 20px 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+        }
+        input[type="file"] {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+        button {
+            background-color: #1e88e5;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background-color: #1565c0;
+        }
+        button:active {
+            transform: scale(0.98);
+        }
+        .log-area {
+            margin-top: 24px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background: #fafafa;
+            padding: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        .log-entry {
+            margin: 4px 0;
+            padding: 4px;
+            border-left: 3px solid transparent;
+        }
+        .log-success {
+            border-left-color: #4caf50;
+            color: #2e7d32;
+        }
+        .log-error {
+            border-left-color: #f44336;
+            color: #c62828;
+        }
+        .log-info {
+            border-left-color: #ff9800;
+            color: #e65100;
+        }
+        .status-bar {
+            margin-top: 16px;
+            font-weight: bold;
+        }
+        hr {
+            margin: 16px 0;
+        }
+        footer {
+            margin-top: 24px;
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+        }
+    </style>
+    <!-- 引入 JSZip 库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+<div class="container">
+    <h1>📺 B站弹幕XML批量转HTML表格工具</h1>
+    <div class="description">
+        <strong>使用说明：</strong><br>
+        1. 选择单个或多个B站弹幕XML文件（格式如示例：<code>&lt;d p="stime,mode,size,color,date,pool,dmid,序号"&gt;弹幕内容&lt;/d&gt;</code>）。<br>
+        2. 点击【开始转换】按钮，程序将解析每个文件并生成独立的HTML表格文件。<br>
+        3. 如果只上传1个文件，会直接下载该HTML；如果上传多个文件，会打包成ZIP下载。<br>
+        4. 任何弹幕的出现时间 ≥ 24小时（86400秒），该文件将停止处理并报错，不生成输出。<br>
+        5. 弹幕颜色自动转为HEX，并根据颜色设置文字颜色；时间戳转换为本地时间。<br>
+        6. 生成的HTML页内包含弹幕表格、mode/pool附表。
+    </div>
+
+    <div class="file-area">
+        <input type="file" id="fileInput" accept=".xml" multiple>
+        <button id="convertBtn">🚀 开始转换</button>
+    </div>
+
+    <div id="logArea" class="log-area">
+        <div class="log-entry log-info">📌 等待操作...</div>
+    </div>
+    <div id="statusBar" class="status-bar"></div>
+    <footer>
+		该工具本地运行，数据不会上传。支持严格错误检测（stime≥24h即终止整个文件）。
+		<br>来自github仓库👉 <a href="https://github.com/aoki393/Bilibili-LiveDanmuXml-Processing-Tool" target="_blank">
+			Bilibili-LiveDanmuXml-Processing-Tool</a>
+	</footer>
+</div>
+
+<script>
+    (function(){
+        // DOM 元素
+        const fileInput = document.getElementById('fileInput');
+        const convertBtn = document.getElementById('convertBtn');
+        const logArea = document.getElementById('logArea');
+        const statusBar = document.getElementById('statusBar');
+
+        // 辅助函数：添加日志
+        function addLog(message, type = 'info') {
+            const div = document.createElement('div');
+            div.className = `log-entry log-${type}`;
+            div.textContent = message;
+            logArea.appendChild(div);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        // 清空日志（但保留一个提示）
+        function clearLogs() {
+            logArea.innerHTML = '';
+        }
+
+        // 格式化时间：秒数 -> HH:MM:SS.xx (两位小数)
+        function formatStime(seconds) {
+            if (seconds >= 86400) {
+                throw new Error(`出现时间 ${seconds} 秒 ≥ 24小时 (86400秒)`);
+            }
+            const totalSec = Math.floor(seconds);
+            const hours = Math.floor(totalSec / 3600);
+            const minutes = Math.floor((totalSec % 3600) / 60);
+            const secs = totalSec % 60;
+            const fraction = (seconds - Math.floor(seconds)).toFixed(2).slice(1); // 如 .23
+            return `${hours.toString().padStart(2,'0')}:${minutes.toString().padStart(2,'0')}:${secs.toString().padStart(2,'0')}${fraction}`;
+        }
+
+        // 十进制颜色转 HEX (#RRGGBB)
+        function decToHex(dec) {
+            let num = parseInt(dec);
+            if (isNaN(num)) throw new Error(`无效的颜色值: ${dec}`);
+            let hex = num.toString(16).padStart(6, '0');
+            if (hex.length > 6) hex = hex.slice(0,6);
+            return '#' + hex;
+        }
+
+        // 格式化 Unix 时间戳 (秒) 为标准本地时间 YYYY-MM-DD HH:MM:SS
+        function formatTimestamp(timestamp) {
+            const date = new Date(timestamp * 1000);
+            const year = date.getFullYear();
+            const month = (date.getMonth() + 1).toString().padStart(2, '0');
+            const day = date.getDate().toString().padStart(2, '0');
+            const hours = date.getHours().toString().padStart(2, '0');
+            const minutes = date.getMinutes().toString().padStart(2, '0');
+            const seconds = date.getSeconds().toString().padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        }
+
+        // 解析单个XML文件，返回 { success: boolean, htmlContent?: string, errorMsg?: string }
+        function processXmlFile(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const xmlText = e.target.result;
+                    try {
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                        // 检查解析错误
+                        const parseError = xmlDoc.querySelector('parsererror');
+                        if (parseError) {
+                            resolve({ success: false, errorMsg: `XML解析错误：${parseError.textContent}` });
+                            return;
+                        }
+						
+						// 提取 real_name 和 roomid
+						const realNameElem = xmlDoc.querySelector('real_name');
+						const roomIdElem = xmlDoc.querySelector('roomid');
+						const realName = realNameElem ? realNameElem.textContent.trim() : '未知UP主';
+						const roomId = roomIdElem ? roomIdElem.textContent.trim() : '未知房间号';
+						
+                        const dElements = xmlDoc.querySelectorAll('d');
+                        if (dElements.length === 0) {
+                            resolve({ success: false, errorMsg: '未找到任何 <d> 弹幕标签' });
+                            return;
+                        }
+
+                        const tableRows = [];
+                        // 用于检查每条弹幕的stime是否超限，一旦超限立刻终止
+                        for (let i = 0; i < dElements.length; i++) {
+                            const d = dElements[i];
+                            const pAttr = d.getAttribute('p');
+                            if (!pAttr) {
+                                resolve({ success: false, errorMsg: `第${i+1}条弹幕缺少p属性，处理终止` });
+                                return;
+                            }
+                            const parts = pAttr.split(',');
+                            if (parts.length !== 8) {
+                                resolve({ success: false, errorMsg: `第${i+1}条弹幕p属性字段数量不是8个（实际${parts.length}），处理终止` });
+                                return;
+                            }
+                            const [stimeStr, modeStr, sizeStr, colorStr, dateStr, poolStr, dmidStr, seqStr] = parts;
+                            
+                            // 转换为数字并验证 stime >= 86400 直接终止
+                            let stime = parseFloat(stimeStr);
+                            if (isNaN(stime)) {
+                                resolve({ success: false, errorMsg: `第${i+1}条弹幕stime非数字: ${stimeStr}，处理终止` });
+                                return;
+                            }
+                            try {
+                                // 检查超限
+                                if (stime >= 86400) {
+                                    throw new Error(`出现时间 ${stime} 秒 ≥ 24小时`);
+                                }
+                            } catch (err) {
+                                resolve({ success: false, errorMsg: `第${i+1}条弹幕${err.message}，处理终止` });
+                                return;
+                            }
+                            
+                            let mode = parseInt(modeStr, 10);
+                            let size = parseInt(sizeStr, 10);
+                            let colorDec = parseInt(colorStr, 10);
+                            let date = parseInt(dateStr, 10);
+                            let pool = parseInt(poolStr, 10);
+                            let dmid = parseInt(dmidStr, 10);
+                            let seq = parseInt(seqStr, 10);
+                            
+                            if (isNaN(mode) || isNaN(size) || isNaN(colorDec) || isNaN(date) || isNaN(pool) || isNaN(dmid) || isNaN(seq)) {
+                                resolve({ success: false, errorMsg: `第${i+1}条弹幕数字字段无效（mode/size/color/date/pool/dmid/seq中有NaN），处理终止` });
+                                return;
+                            }
+                            
+                            const textContent = d.textContent.trim() || '';
+                            const hexColor = decToHex(colorDec);
+                            const formattedStime = formatStime(stime);
+                            const formattedDate = formatTimestamp(date);
+                            
+                            // 存储一行数据
+                            tableRows.push({
+                                text: textContent,
+                                stimeDisplay: formattedStime,
+                                mode: mode,
+                                size: size,
+                                colorHex: hexColor,
+                                colorDec: colorDec,
+                                dateDisplay: formattedDate,
+                                pool: pool,
+                                dmid: dmid,
+                                seq: seq
+                            });
+                        }
+                        
+                        // 所有弹幕解析成功，生成HTML内容
+                        const htmlContent = generateHtmlTable(file.name, tableRows, realName, roomId);
+                        resolve({ success: true, htmlContent: htmlContent });
+                    } catch (err) {
+                        resolve({ success: false, errorMsg: `解析异常: ${err.message}` });
+                    }
+                };
+                reader.onerror = () => {
+                    resolve({ success: false, errorMsg: '文件读取失败' });
+                };
+                reader.readAsText(file, 'UTF-8');
+            });
+        }
+
+        // 生成单个HTML文件内容（包含表格和附表）
+        function generateHtmlTable(originalFilename, rows, realName, roomId) {
+            // 文件名去掉 .xml 后缀
+            const baseName = originalFilename.replace(/\.xml$/i, '');
+            // 构建表格行HTML
+            let tableRowsHtml = '';
+            for (const row of rows) {
+                // 对弹幕内容进行HTML转义，防止XSS
+                const escapedText = escapeHtml(row.text);
+                tableRowsHtml += `
+                    <tr>
+						<td>${row.seq}</td>
+						<td>${row.stimeDisplay}</td>
+						<td>${escapedText}</td>				                        
+                        <td>${row.mode}</td>
+                        <td>${row.size}</td>
+                        <td><span style="display:inline-block;width:16px;height:16px;background:${row.colorHex};border:1px solid #aaa;margin-right:6px;vertical-align:middle;"></span> ${row.colorHex}</td>
+                        <td>${row.dateDisplay}</td>
+                        <td>${row.pool}</td>
+                        <td>${row.dmid}</td>                        
+                    </tr>
+                `;
+            }
+
+            // 附表内容
+            const modeTable = `
+                <h3>📌 附表1：弹幕模式（mode）说明</h3>
+                <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; margin-bottom: 20px;">
+                    <tr><th>mode</th><th>类型</th></tr>
+                    <tr><td>1</td><td>滚动弹幕</td></tr>
+                    <tr><td>2</td><td>滚动弹幕</td></tr>
+                    <tr><td>3</td><td>滚动弹幕</td></tr>
+                    <tr><td>4</td><td>底部弹幕</td></tr>
+                    <tr><td>5</td><td>顶部弹幕</td></tr>
+                    <tr><td>6</td><td>逆向弹幕</td></tr>
+                    <tr><td>7</td><td>特殊弹幕</td></tr>
+                    <tr><td>其他</td><td>未知模式</td></tr>
+                </table>
+            `;
+            const poolTable = `
+                <h3>📌 附表2：弹幕池（pool）说明</h3>
+                <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+                    <tr><th>pool</th><th>含义</th></tr>
+                    <tr><td>0</td><td>普通池</td></tr>
+                    <tr><td>1</td><td>字幕池</td></tr>
+                    <tr><td>2</td><td>特殊池</td></tr>
+                </table>
+            `;
+
+            const fullHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>${escapeHtml(baseName)} - 弹幕表格</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f4f4f9;
+            margin: 20px;
+            padding: 0;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 20px;
+            overflow-x: auto;
+        }
+        h1 {
+            font-size: 1.8rem;
+            color: #1e88e5;
+            margin-top: 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin: 20px 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px 8px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #1e88e5;
+            color: white;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        tr:hover {
+            background-color: #f1f5f9;
+        }
+        .footer {
+            margin-top: 30px;
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+            border-top: 1px solid #eee;
+            padding-top: 16px;
+        }
+        .appendix {
+            margin-top: 40px;
+            background: #fafafa;
+            padding: 16px;
+            border-radius: 8px;
+        }
+        code {
+            background: #eee;
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📄 ${escapeHtml(baseName)} 弹幕记录</h1>
+	<div>
+		<strong>UP主：</strong> ${escapeHtml(realName)} &nbsp;|&nbsp; 
+		<strong>房间号：</strong> ${escapeHtml(roomId)}
+	</div>
+    <p><strong>弹幕总数：</strong> ${rows.length} 条</p>
+    <table>
+        <thead>
+            <tr>
+				<th>序号</th>                
+                <th>出现时间</th>
+				<th>弹幕内容</th>
+                <th>模式</th>
+                <th>字号</th>
+                <th>颜色</th>
+                <th>发送时间</th>
+                <th>弹幕池</th>
+                <th>弹幕ID</th>                
+            </tr>
+        </thead>
+        <tbody>
+            ${tableRowsHtml}
+        </tbody>
+    </table>
+    <div class="appendix">
+        ${modeTable}
+        ${poolTable}
+    </div>
+    <div class="footer">
+        生成时间: ${new Date().toLocaleString()} <br> 
+		所用工具: <a href="https://github.com/aoki393/Bilibili-LiveDanmuXml-Processing-Tool" target="_blank">B站直播弹幕XML转HTML</a> <br>
+    </div>
+</div>
+</body>
+</html>`;
+            return fullHtml;
+        }
+
+        // 简单的HTML转义
+        function escapeHtml(str) {
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            }).replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(c) {
+                return c;
+            });
+        }
+
+        // 处理所有文件的主函数
+        async function processFiles(files) {
+            clearLogs();
+            statusBar.textContent = '';
+            if (!files.length) {
+                addLog('⚠️ 请先选择XML文件', 'error');
+                return;
+            }
+
+            addLog(`📁 选择了 ${files.length} 个文件，开始处理...`, 'info');
+            const results = []; // 存储 { originalName, htmlContent, success, errorMsg }
+
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                addLog(`🔄 正在处理: ${file.name} ...`, 'info');
+                const result = await processXmlFile(file);
+                if (result.success) {
+                    results.push({
+                        originalName: file.name,
+                        htmlContent: result.htmlContent,
+                        success: true
+                    });
+                    addLog(`✅ ${file.name} 处理成功，共生成表格。`, 'success');
+                } else {
+                    results.push({
+                        originalName: file.name,
+                        success: false,
+                        errorMsg: result.errorMsg
+                    });
+                    addLog(`❌ ${file.name} 处理失败: ${result.errorMsg}`, 'error');
+                }
+            }
+
+            const successItems = results.filter(r => r.success);
+            const failCount = results.length - successItems.length;
+            statusBar.innerHTML = `📊 处理完成：成功 ${successItems.length} 个，失败 ${failCount} 个。`;
+
+            if (successItems.length === 0) {
+                addLog(`⚠️ 没有成功生成任何HTML文件，不执行下载。`, 'error');
+                return;
+            }
+
+            // 根据成功文件数量决定下载方式
+            if (successItems.length === 1) {
+                // 直接下载单个HTML文件
+                const item = successItems[0];
+                const downloadName = item.originalName.replace(/\.xml$/i, '.html');
+                const blob = new Blob([item.htmlContent], {type: 'text/html'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = downloadName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                addLog(`📥 已下载单个文件: ${downloadName}`, 'success');
+            } else {
+                // 打包ZIP
+                const zip = new JSZip();
+                for (const item of successItems) {
+                    const fileName = item.originalName.replace(/\.xml$/i, '.html');
+                    zip.file(fileName, item.htmlContent);
+                }
+                const zipBlob = await zip.generateAsync({type: 'blob'});
+                const zipUrl = URL.createObjectURL(zipBlob);
+                const a = document.createElement('a');
+                a.href = zipUrl;
+                a.download = 'danmaku_tables.zip';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(zipUrl);
+                addLog(`📦 已打包下载ZIP，共 ${successItems.length} 个HTML文件。`, 'success');
+            }
+        }
+
+        // 绑定点击事件
+        convertBtn.addEventListener('click', () => {
+            const files = Array.from(fileInput.files);
+            if (files.length === 0) {
+                addLog('⚠️ 请先选择XML文件', 'error');
+                return;
+            }
+            processFiles(files);
+        });
+    })();
+</script>
+</body>
+</html>
